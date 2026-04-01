@@ -1,0 +1,15 @@
+FROM node:20-slim
+
+ENV OPENCLAW_HOME=/app \
+    PATH=/root/.npm-global/bin:$PATH
+
+RUN npm config set prefix /root/.npm-global \
+ && npm install -g openclaw \
+ && mkdir -p /app/config /root/.openclaw/agents
+
+WORKDIR /app
+
+# Конфиг и агенты монтируются томами; образ остаётся тонким.
+EXPOSE 3001
+
+CMD ["sh", "-c", "openclaw start --config ${OPENCLAW_CONFIG:-/app/config/openclaw.json} --port ${GATEWAY_PORT:-3001}"]

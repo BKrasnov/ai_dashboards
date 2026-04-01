@@ -1,0 +1,42 @@
+{
+  "models": {
+    "providers": {
+      "gigachat": {
+        "baseUrl": "http://127.0.0.1:8443",
+        "apiKey": "dummy",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "GigaChat",
+            "name": "GigaChat Lite",
+            "contextWindow": 8192,
+            "maxTokens": 2048
+          },
+          {
+            "id": "GigaChat-Pro",
+            "name": "GigaChat Pro",
+            "contextWindow": 32768,
+            "maxTokens": 4096
+          },
+          {
+            "id": "GigaChat-Max",
+            "name": "GigaChat MAX",
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "ruslan",
+        "name": "Ruslan",
+        "emoji": "🐻",
+        "model": "gigachat/GigaChat-Pro",
+        "workspace": "./agents/ruslan/workspace"
+      }
+    ]
+  }
+}
