@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "gateway:local": "openclaw start --config ./config/openclaw.local.json --port 3001"
+    "gateway:local": "openclaw start --config ./config/openclaw.local.json --port 3001",
+    "mock:gateway": "node scripts/dev/mock-gateway.js"
   },
   "devDependencies": {
     "openclaw": "^2026.3.28"

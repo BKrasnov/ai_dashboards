@@ -1,4 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
+import Highcharts from "highcharts";
+import HighchartsReact from "highcharts-react-official";
 
 type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
 
@@ -9,6 +11,7 @@ export default function App() {
   const [model, setModel] = useState("gigachat/GigaChat-Pro");
   const [isSending, setIsSending] = useState(false);
   const [log, setLog] = useState<string[]>([]);
+  const [chartOptions, setChartOptions] = useState<any | null>(null);
 
   const pipeline = useMemo(
     () => ["UI", "Gateway", "gpt2giga", "GigaChat"],
@@ -29,6 +32,11 @@ export default function App() {
         })
       });
       const json = await res.json();
+      if (json.chartOptions) {
+        setChartOptions(json.chartOptions);
+      } else {
+        setChartOptions(null);
+      }
       const answer =
         json?.choices?.[0]?.message?.content ??
         json?.message ??
@@ -85,6 +93,20 @@ export default function App() {
         <button onClick={send} disabled={isSending}>
           {isSending ? "Отправка..." : "Отправить"}
         </button>
+      </section>
+
+      <section className="card">
+        <div className="log-header">
+          <strong>График (mock/реальный)</strong>
+          <span className="muted">
+            Отображает Highcharts options, если backend их вернул.
+          </span>
+        </div>
+        {chartOptions ? (
+          <HighchartsReact highcharts={Highcharts} options={chartOptions} />
+        ) : (
+          <div className="muted">Пока нет данных для графика.</div>
+        )}
       </section>
 
       <section className="card">
