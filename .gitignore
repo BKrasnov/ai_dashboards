@@ -20,3 +20,7 @@ Thumbs.db
 .idea/
 
 *.tsbuildinfo
+
+# Claude / Superpowers artifacts
+.claude/
+docs/superpowers/
