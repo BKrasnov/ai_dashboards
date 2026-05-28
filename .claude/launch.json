@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "port": 5173,
+      "env": {
+        "VITE_API_URL": "http://localhost:3002",
+        "VITE_KITAI_AGENT_ID": "dashboarder"
+      }
+    }
+  ]
+}

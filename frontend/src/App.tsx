@@ -1,33 +1,44 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Highcharts from "highcharts";
 import HighchartsReact from "highcharts-react-official";
+import { getAgent, runAgentQuery, type AgentInfo, type TraceItem } from "./kitai";
 
-type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
-type TraceItem = { stage: string; durMs?: number; status?: string };
-
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
-const WARN_MS = 300;
+const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3001";
+const DEFAULT_AGENT_ID =
+  (import.meta.env.VITE_KITAI_AGENT_ID as string | undefined) ?? "dashboarder";
+const DEFAULT_TOKEN = (import.meta.env.VITE_KITAI_TOKEN as string | undefined) ?? "";
+const WARN_MS = 600;
 
 export default function App() {
-  const [prompt, setPrompt] = useState("Привет, кто ты?");
-  const [model, setModel] = useState("gigachat/GigaChat-Pro");
+  const [prompt, setPrompt] = useState("Покажи график продаж по месяцам.");
+  const [agentId, setAgentId] = useState(DEFAULT_AGENT_ID);
+  const [token, setToken] = useState(DEFAULT_TOKEN);
+  const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [chartOptions, setChartOptions] = useState<any | null>(null);
   const [trace, setTrace] = useState<TraceItem[]>([]);
-  const [requestId, setRequestId] = useState<string | null>(null);
-  const [lastRequest, setLastRequest] = useState<any | null>(null);
-  const [lastResponse, setLastResponse] = useState<any | null>(null);
+  const [lastRequest, setLastRequest] = useState<unknown | null>(null);
+  const [lastResponse, setLastResponse] = useState<unknown | null>(null);
   const [showRequest, setShowRequest] = useState(true);
   const [showResponse, setShowResponse] = useState(true);
-  const [pendingExtra, setPendingExtra] = useState<Record<string, unknown> | null>(
-    null
-  );
+  const [pendingExtra, setPendingExtra] = useState<Record<string, unknown> | null>(null);
 
   const defaultPipeline = useMemo(
-    () => ["UI", "OpenClaw Gateway", "gpt2giga", "GigaChat"],
+    () => ["UI", "KitAI Gateway", "Agent (Dashboarder)", "GigaChat"],
     []
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const info = await getAgent(API_URL, agentId, token || undefined);
+      if (!cancelled) setAgentInfo(info);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, token]);
 
   const calcStatus = (item: TraceItem): "ok" | "warn" | "fail" => {
     if (item.status === "fail") return "fail";
@@ -49,37 +60,22 @@ export default function App() {
       const currentPrompt = (customPrompt ?? prompt).trim();
       if (!currentPrompt) return;
       const mergedExtra = extraPayload ?? pendingExtra ?? {};
-      const payload = {
-        messages: [{ role: "user", content: currentPrompt } satisfies ChatMessage],
-        model,
-        ...mergedExtra
-      };
       setIsSending(true);
       setTrace([]);
-      setRequestId(null);
-      setLastRequest(payload);
       setLog((prev) => [`→ ${currentPrompt}`, ...prev]);
       try {
-        const res = await fetch(`${API_URL}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
+        const result = await runAgentQuery({
+          baseUrl: API_URL,
+          agentId,
+          prompt: currentPrompt,
+          token: token || undefined,
+          extra: mergedExtra
         });
-        const json = await res.json();
-        setLastResponse(json);
-        setChartOptions(json.chartOptions ?? null);
-        const nextTrace = Array.isArray(json.trace) ? json.trace : [];
-        const nextRequestId = json.requestId ? String(json.requestId) : null;
-        setTrace(nextTrace);
-        setRequestId(nextRequestId);
-        const answer =
-          json?.choices?.[0]?.message?.content ??
-          json?.message ??
-          JSON.stringify(json);
-        setLog((prev) => [
-          `← ${nextRequestId ? `[#${nextRequestId}] ` : ""}${answer}`,
-          ...prev
-        ]);
+        setLastRequest(result.requestPayload);
+        setLastResponse(result.finalResult);
+        setTrace(result.trace);
+        setChartOptions(result.chartOptions ?? null);
+        setLog((prev) => [`← ${result.text || "(пустой ответ)"}`, ...prev]);
       } catch (err) {
         setLog((prev) => [`⚠️ ${String(err)}`, ...prev]);
       } finally {
@@ -87,7 +83,7 @@ export default function App() {
         setPendingExtra(null);
       }
     },
-    [prompt, model, pendingExtra]
+    [prompt, agentId, token, pendingExtra]
   );
 
   const suggestions = [
@@ -138,12 +134,8 @@ export default function App() {
   const displayTrace =
     trace.length > 0
       ? trace
-      : defaultPipeline.map(
-          (stage) => ({ stage, status: "ok" } as TraceItem)
-        );
-
+      : defaultPipeline.map((stage) => ({ stage, status: "ok" } as TraceItem));
   const overall = worstStatus(displayTrace);
-
   const statusLabel = (s: "ok" | "warn" | "fail") =>
     s === "ok" ? "OK" : s === "warn" ? "WARN" : "FAIL";
 
@@ -162,17 +154,45 @@ export default function App() {
   return (
     <div className="page">
       <header>
-        <h1>OpenClaw ↔ gpt2giga ↔ GigaChat</h1>
+        <h1>Агент «Дашбордер» (KitAI)</h1>
         <p className="muted">
-          Ассистент на OpenClaw, который ходит в GigaChat через gpt2giga и
-          возвращает текст + Highcharts options.
+          UI вызывает KitAI Public Integration API по паттерну register → poll → commit
+          и рендерит ответ агента + Highcharts.
         </p>
       </header>
 
       <section className="card">
         <div className="log-header">
+          <strong>Агент</strong>
+          <span className="muted">
+            {agentInfo
+              ? `id=${agentInfo.id} • ${agentInfo.name} — ${agentInfo.description ?? ""}`
+              : "не загружено / нет связи"}
+          </span>
+        </div>
+        <label className="label">
+          Agent ID
+          <input
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            placeholder="dashboarder"
+          />
+        </label>
+        <label className="label">
+          Auth token (Bearer)
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder="mock-token"
+          />
+        </label>
+      </section>
+
+      <section className="card">
+        <div className="log-header">
           <strong>Flow</strong>
-          <span className="muted">live trace с таймингами</span>
+          <span className="muted">register → poll → commit</span>
         </div>
         <div className="status-badge" data-status={overall}>
           {statusLabel(overall)}
@@ -189,9 +209,7 @@ export default function App() {
                     <span className="pill-time">{item.durMs} ms</span>
                   )}
                 </div>
-                {idx < displayTrace.length - 1 && (
-                  <div className="arrow">➜</div>
-                )}
+                {idx < displayTrace.length - 1 && <div className="arrow">➜</div>}
               </div>
             );
           })}
@@ -215,24 +233,13 @@ export default function App() {
               key={s.label}
               type="button"
               className="suggestion-btn"
-              onClick={(e) =>
-                handleSuggestion(s.text, s.extra, e.ctrlKey || e.metaKey)
-              }
+              onClick={(e) => handleSuggestion(s.text, s.extra, e.ctrlKey || e.metaKey)}
               title="Ctrl/Cmd + click — сразу отправить"
             >
               {s.label}
             </button>
           ))}
         </div>
-
-        <label className="label">
-          Модель
-          <select value={model} onChange={(e) => setModel(e.target.value)}>
-            <option value="gigachat/GigaChat">GigaChat Lite</option>
-            <option value="gigachat/GigaChat-Pro">GigaChat Pro</option>
-            <option value="gigachat/GigaChat-Max">GigaChat MAX</option>
-          </select>
-        </label>
 
         <button onClick={() => send()} disabled={isSending}>
           {isSending ? "Отправка..." : "Отправить"}
@@ -241,9 +248,9 @@ export default function App() {
 
       <section className="card">
         <div className="log-header">
-          <strong>График (mock/реальный)</strong>
+          <strong>График</strong>
           <span className="muted">
-            Отображает Highcharts options, если backend их вернул.
+            chartOptions из response.chartOptions или JSON.parse(response_body)
           </span>
         </div>
         {chartOptions ? (
@@ -256,12 +263,12 @@ export default function App() {
       <section className="card">
         <div className="log-header">
           <strong>Request / Response</strong>
-          <span className="muted">JSON в OpenAI-совместимом формате</span>
+          <span className="muted">payload register и финальный QueryResultPDto</span>
         </div>
         <div className="json-panels">
           <div className="json-panel">
             <div className="json-header">
-              <span>Request</span>
+              <span>Register payload</span>
               <button
                 className="toggle-btn"
                 type="button"
@@ -272,15 +279,13 @@ export default function App() {
             </div>
             {showRequest && (
               <pre className="json-content">
-                {lastRequest
-                  ? JSON.stringify(lastRequest, null, 2)
-                  : "— ещё не отправляли"}
+                {lastRequest ? JSON.stringify(lastRequest, null, 2) : "— ещё не отправляли"}
               </pre>
             )}
           </div>
           <div className="json-panel">
             <div className="json-header">
-              <span>Response</span>
+              <span>Final result</span>
               <button
                 className="toggle-btn"
                 type="button"
@@ -291,9 +296,7 @@ export default function App() {
             </div>
             {showResponse && (
               <pre className="json-content">
-                {lastResponse
-                  ? JSON.stringify(lastResponse, null, 2)
-                  : "— ответа пока нет"}
+                {lastResponse ? JSON.stringify(lastResponse, null, 2) : "— ответа пока нет"}
               </pre>
             )}
           </div>
