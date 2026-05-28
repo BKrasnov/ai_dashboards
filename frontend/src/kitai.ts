@@ -6,9 +6,15 @@ export type AgentInfo = {
   description?: string;
 };
 
+export type AgentQuestion = { id: string; text: string; hint?: string };
+
+export type AgentAnswer =
+  | { kind: "chart"; question: string; chartOptions: any; raw: any }
+  | { kind: "questions"; questions: AgentQuestion[]; alreadyKnown: any; raw: any }
+  | { kind: "error"; message: string; statusCode?: number; raw: any };
+
 export type KitaiRunResult = {
-  text: string;
-  chartOptions: unknown | null;
+  answer: AgentAnswer;
   trace: TraceItem[];
   requestPayload: unknown;
   finalResult: unknown;
@@ -39,26 +45,43 @@ export async function getAgent(
   }
 }
 
-function extractChartOptions(finalData: any): unknown | null {
-  const direct = finalData?.response?.chartOptions;
-  if (direct) return direct;
-  const body = finalData?.response_body;
-  if (typeof body === "string") {
-    try {
-      const parsed = JSON.parse(body);
-      if (parsed?.chartOptions) return parsed.chartOptions;
-    } catch {
-      // ignore
-    }
+function parseAgentAnswer(finalData: any): AgentAnswer {
+  const statusCode: number | undefined = finalData?.response_code;
+  const body: unknown = finalData?.response_body;
+  if (typeof statusCode === "number" && statusCode >= 400) {
+    return {
+      kind: "error",
+      message: typeof body === "string" ? body : `HTTP ${statusCode}`,
+      statusCode,
+      raw: finalData
+    };
   }
-  return null;
-}
-
-function extractText(finalData: any): string {
-  const msg = finalData?.response?.choices?.[0]?.message?.content;
-  if (typeof msg === "string") return msg;
-  if (typeof finalData?.response_body === "string") return finalData.response_body;
-  return "";
+  if (typeof body !== "string") {
+    return { kind: "error", message: "Пустой ответ агента", raw: finalData };
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { kind: "error", message: body, raw: finalData };
+  }
+  if (parsed?.status === "ready" && parsed?.answer) {
+    return {
+      kind: "chart",
+      question: typeof parsed.question === "string" ? parsed.question : "",
+      chartOptions: parsed.answer,
+      raw: parsed
+    };
+  }
+  if (parsed?.status === "need_more_info" && Array.isArray(parsed?.questions)) {
+    return {
+      kind: "questions",
+      questions: parsed.questions,
+      alreadyKnown: parsed.already_known ?? {},
+      raw: parsed
+    };
+  }
+  return { kind: "error", message: "Не удалось распознать ответ агента", raw: parsed };
 }
 
 export async function runAgentQuery(opts: {
@@ -159,8 +182,7 @@ export async function runAgentQuery(opts: {
   });
 
   return {
-    text: extractText(finalData),
-    chartOptions: extractChartOptions(finalData),
+    answer: parseAgentAnswer(finalData),
     trace,
     requestPayload,
     finalResult: finalData

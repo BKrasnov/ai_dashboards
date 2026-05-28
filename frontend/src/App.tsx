@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Highcharts from "highcharts";
 import HighchartsReact from "highcharts-react-official";
-import { getAgent, runAgentQuery, type AgentInfo, type TraceItem } from "./kitai";
+import {
+  getAgent,
+  runAgentQuery,
+  type AgentAnswer,
+  type AgentInfo,
+  type TraceItem
+} from "./kitai";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3001";
 const DEFAULT_AGENT_ID =
@@ -9,20 +15,48 @@ const DEFAULT_AGENT_ID =
 const DEFAULT_TOKEN = (import.meta.env.VITE_KITAI_TOKEN as string | undefined) ?? "";
 const WARN_MS = 600;
 
+type ChatMessage =
+  | { id: string; role: "user"; text: string; sentAt: Date }
+  | {
+      id: string;
+      role: "assistant";
+      sentAt: Date;
+      answer: AgentAnswer;
+      trace: TraceItem[];
+    };
+
+const DEMO_SCENARIO = [
+  "создай столбчатую диаграмму графиков с цветами радуги, с любыми данными, категории: Банк, департамент, трайб, Ас",
+  "создай столбчатую диаграмму графиков с цветами радуги, с любыми данными, категории: Банк, департамент, трайб",
+  "создай столбчатую диаграмму графиков с цветами радуги",
+  "создай столбчатую диаграмму графиков с цветами радуги с любыми категориями",
+  "сделай диаграмму"
+];
+
+const fmtTs = (d: Date) =>
+  `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+
+const newId = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
 export default function App() {
-  const [prompt, setPrompt] = useState("Покажи график продаж по месяцам.");
+  const [prompt, setPrompt] = useState("");
   const [agentId, setAgentId] = useState(DEFAULT_AGENT_ID);
   const [token, setToken] = useState(DEFAULT_TOKEN);
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [isSending, setIsSending] = useState(false);
-  const [log, setLog] = useState<string[]>([]);
-  const [chartOptions, setChartOptions] = useState<any | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [lastRequest, setLastRequest] = useState<unknown | null>(null);
   const [lastResponse, setLastResponse] = useState<unknown | null>(null);
-  const [showRequest, setShowRequest] = useState(true);
-  const [showResponse, setShowResponse] = useState(true);
-  const [pendingExtra, setPendingExtra] = useState<Record<string, unknown> | null>(null);
+  const [showRequest, setShowRequest] = useState(false);
+  const [showResponse, setShowResponse] = useState(false);
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatRef = useRef<HTMLDivElement | null>(null);
+  const scenarioRunning = useRef(false);
 
   const defaultPipeline = useMemo(
     () => ["UI", "KitAI Gateway", "Agent (Dashboarder)", "GigaChat"],
@@ -40,6 +74,12 @@ export default function App() {
     };
   }, [agentId, token]);
 
+  useEffect(() => {
+    if (chatRef.current) {
+      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    }
+  }, [messages]);
+
   const calcStatus = (item: TraceItem): "ok" | "warn" | "fail" => {
     if (item.status === "fail") return "fail";
     if (item.status === "warn") return "warn";
@@ -56,80 +96,82 @@ export default function App() {
   };
 
   const send = useCallback(
-    async (customPrompt?: string, extraPayload?: Record<string, unknown>) => {
+    async (customPrompt?: string) => {
       const currentPrompt = (customPrompt ?? prompt).trim();
       if (!currentPrompt) return;
-      const mergedExtra = extraPayload ?? pendingExtra ?? {};
       setIsSending(true);
-      setTrace([]);
-      setLog((prev) => [`→ ${currentPrompt}`, ...prev]);
+      setMessages((prev) => [
+        ...prev,
+        { id: newId(), role: "user", text: currentPrompt, sentAt: new Date() }
+      ]);
+      if (customPrompt === undefined) setPrompt("");
       try {
         const result = await runAgentQuery({
           baseUrl: API_URL,
           agentId,
           prompt: currentPrompt,
-          token: token || undefined,
-          extra: mergedExtra
+          token: token || undefined
         });
         setLastRequest(result.requestPayload);
         setLastResponse(result.finalResult);
         setTrace(result.trace);
-        setChartOptions(result.chartOptions ?? null);
-        setLog((prev) => [`← ${result.text || "(пустой ответ)"}`, ...prev]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            role: "assistant",
+            sentAt: new Date(),
+            answer: result.answer,
+            trace: result.trace
+          }
+        ]);
       } catch (err) {
-        setLog((prev) => [`⚠️ ${String(err)}`, ...prev]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            role: "assistant",
+            sentAt: new Date(),
+            answer: {
+              kind: "error",
+              message: String(err),
+              raw: null
+            },
+            trace: []
+          }
+        ]);
       } finally {
         setIsSending(false);
-        setPendingExtra(null);
       }
     },
-    [prompt, agentId, token, pendingExtra]
+    [prompt, agentId, token]
   );
 
-  const suggestions = [
-    {
-      label: "Линейный график продаж",
-      text: "Построй линейный график продаж по месяцам: Янв 120, Фев 150, Мар 90, Апр 210.",
-      extra: {
-        wantChart: true,
-        chartType: "line",
-        data: [
-          ["Янв", 120],
-          ["Фев", 150],
-          ["Мар", 90],
-          ["Апр", 210]
-        ]
+  const runScenario = useCallback(async () => {
+    if (scenarioRunning.current || isSending) return;
+    scenarioRunning.current = true;
+    try {
+      for (const p of DEMO_SCENARIO) {
+        if (!scenarioRunning.current) break;
+        await send(p);
+        await new Promise((r) => setTimeout(r, 800));
       }
-    },
-    {
-      label: "По категориям",
-      text: "Сделай pie chart долей: Электроника 40, Одежда 35, Детское 25.",
-      extra: {
-        wantChart: true,
-        chartType: "pie",
-        data: [
-          ["Электроника", 40],
-          ["Одежда", 35],
-          ["Детское", 25]
-        ]
-      }
-    },
-    {
-      label: "Scatter точки",
-      text: "Покажи scatter связь возраст/чек: (22,700); (30,900); (45,1200).",
-      extra: {
-        wantChart: true,
-        chartType: "scatter",
-        data: [
-          [22, 700],
-          [30, 900],
-          [45, 1200]
-        ],
-        xTitle: "Возраст",
-        yTitle: "Средний чек"
-      }
+    } finally {
+      scenarioRunning.current = false;
     }
-  ];
+  }, [send, isSending]);
+
+  const handleQuestionAnswer = (q: { text: string }) => {
+    setPrompt((p) => (p ? p + "\n" : "") + `${q.text} `);
+    textareaRef.current?.focus();
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  };
 
   const displayTrace =
     trace.length > 0
@@ -139,25 +181,13 @@ export default function App() {
   const statusLabel = (s: "ok" | "warn" | "fail") =>
     s === "ok" ? "OK" : s === "warn" ? "WARN" : "FAIL";
 
-  const handleSuggestion = (
-    text: string,
-    extra: Record<string, unknown> | undefined,
-    autoSend: boolean
-  ) => {
-    setPrompt(text);
-    setPendingExtra(extra ?? null);
-    if (autoSend) {
-      void send(text, extra);
-    }
-  };
-
   return (
     <div className="page">
       <header>
         <h1>Агент «Дашбордер» (KitAI)</h1>
         <p className="muted">
-          UI вызывает KitAI Public Integration API по паттерну register → poll → commit
-          и рендерит ответ агента + Highcharts.
+          Демо-чат с KitAI Public Integration API. UI шлёт register → poll → commit и
+          рендерит ответ: график, уточняющие вопросы или ошибку.
         </p>
       </header>
 
@@ -217,53 +247,89 @@ export default function App() {
       </section>
 
       <section className="card">
-        <label className="label">
+        <div className="log-header">
+          <strong>Чат</strong>
+          <span className="muted">{messages.length} сообщ.</span>
+        </div>
+        <div className="chat-list" ref={chatRef}>
+          {messages.length === 0 && (
+            <div className="muted">Напишите запрос или прогоните сценарий.</div>
+          )}
+          {messages.map((m) =>
+            m.role === "user" ? (
+              <div key={m.id} className="chat-msg role-user">
+                <div className="chat-avatar" data-role="user">U</div>
+                <div className="chat-bubble">
+                  <div className="chat-ts">{fmtTs(m.sentAt)} • вы</div>
+                  <div className="chat-text">{m.text}</div>
+                </div>
+              </div>
+            ) : (
+              <div key={m.id} className="chat-msg role-assistant">
+                <div className="chat-avatar" data-role="assistant">D</div>
+                <div className="chat-bubble">
+                  <div className="chat-ts">
+                    {fmtTs(m.sentAt)} • Dashboarder
+                    {m.trace.length > 0 && (
+                      <>
+                        {" • "}
+                        {m.trace
+                          .filter((t) => t.durMs != null)
+                          .map((t) => `${t.stage} ${t.durMs}ms`)
+                          .join(" / ")}
+                      </>
+                    )}
+                  </div>
+                  <AssistantContent answer={m.answer} onAnswerQuestion={handleQuestionAnswer} />
+                </div>
+              </div>
+            )
+          )}
+        </div>
+
+        <label className="label" style={{ marginTop: "0.75rem" }}>
           Текст запроса
           <textarea
+            ref={textareaRef}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Введите промпт"
-            rows={4}
+            onKeyDown={onKeyDown}
+            placeholder="Введите промпт (Enter — отправить, Shift+Enter — перенос)"
+            rows={3}
           />
         </label>
 
         <div className="suggestions">
-          {suggestions.map((s) => (
+          {DEMO_SCENARIO.map((s, idx) => (
             <button
-              key={s.label}
+              key={idx}
               type="button"
               className="suggestion-btn"
-              onClick={(e) => handleSuggestion(s.text, s.extra, e.ctrlKey || e.metaKey)}
-              title="Ctrl/Cmd + click — сразу отправить"
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey) void send(s);
+                else setPrompt(s);
+              }}
+              title={`Ctrl/Cmd+click — сразу отправить.\n${s}`}
             >
-              {s.label}
+              {idx + 1}. {s.length > 50 ? s.slice(0, 47) + "…" : s}
             </button>
           ))}
         </div>
 
-        <button onClick={() => send()} disabled={isSending}>
-          {isSending ? "Отправка..." : "Отправить"}
-        </button>
-      </section>
-
-      <section className="card">
-        <div className="log-header">
-          <strong>График</strong>
-          <span className="muted">
-            chartOptions из response.chartOptions или JSON.parse(response_body)
-          </span>
+        <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+          <button onClick={() => send()} disabled={isSending}>
+            {isSending ? "Отправка..." : "Отправить"}
+          </button>
+          <button onClick={runScenario} disabled={isSending} type="button">
+            ▶ Прогнать сценарий
+          </button>
         </div>
-        {chartOptions ? (
-          <HighchartsReact highcharts={Highcharts} options={chartOptions} />
-        ) : (
-          <div className="muted">Пока нет данных для графика.</div>
-        )}
       </section>
 
       <section className="card">
         <div className="log-header">
-          <strong>Request / Response</strong>
-          <span className="muted">payload register и финальный QueryResultPDto</span>
+          <strong>Debug: последний обмен</strong>
+          <span className="muted">register payload + финальный QueryResultPDto</span>
         </div>
         <div className="json-panels">
           <div className="json-panel">
@@ -302,23 +368,60 @@ export default function App() {
           </div>
         </div>
       </section>
+    </div>
+  );
+}
 
-      <section className="card">
-        <div className="log-header">
-          <strong>Лог</strong>
-          <span className="muted">новые сверху</span>
+function AssistantContent({
+  answer,
+  onAnswerQuestion
+}: {
+  answer: AgentAnswer;
+  onAnswerQuestion: (q: { text: string }) => void;
+}) {
+  if (answer.kind === "chart") {
+    return (
+      <>
+        <div className="chat-text">График готов.</div>
+        <div style={{ marginTop: "0.5rem" }}>
+          <HighchartsReact highcharts={Highcharts} options={answer.chartOptions} />
         </div>
-        <div className="log">
-          {log.length === 0 && (
-            <div className="muted">Пока пусто — отправьте первый запрос.</div>
-          )}
-          {log.map((line, i) => (
-            <div key={i} className="log-line">
-              {line}
-            </div>
+        <details style={{ marginTop: "0.5rem" }}>
+          <summary className="muted" style={{ cursor: "pointer" }}>
+            raw answer
+          </summary>
+          <pre className="json-content">{JSON.stringify(answer.raw, null, 2)}</pre>
+        </details>
+      </>
+    );
+  }
+  if (answer.kind === "questions") {
+    return (
+      <>
+        <div className="chat-text">Нужно уточнение:</div>
+        <ul className="chat-questions">
+          {answer.questions.map((q) => (
+            <li key={q.id}>
+              <div>{q.text}</div>
+              {q.hint && <div className="chat-hint">подсказка: {q.hint}</div>}
+              <button
+                className="toggle-btn"
+                type="button"
+                onClick={() => onAnswerQuestion(q)}
+                style={{ marginTop: "0.25rem" }}
+              >
+                Ответить
+              </button>
+            </li>
           ))}
-        </div>
-      </section>
+        </ul>
+      </>
+    );
+  }
+  return (
+    <div className="chat-error">
+      {answer.statusCode ? `HTTP ${answer.statusCode}: ` : ""}
+      {answer.message}
     </div>
   );
 }
